@@ -1,0 +1,28 @@
+# dependencies & build output
+node_modules/
+dist/
+dist.noindex/
+release/
+bin/
+
+# Android
+android/.toolchain/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+*.apk
+*.aab
+
+# Android signing — NEVER commit these (back them up somewhere safe instead)
+android/keystore/
+android/keystore.properties
+*.jks
+*.keystore
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/

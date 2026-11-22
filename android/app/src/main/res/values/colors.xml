@@ -1,0 +1,6 @@
+<resources>
+    <color name="brand">#2463EB</color>
+    <color name="ic_launcher_bg_top">#4C8DFF</color>
+    <color name="ic_launcher_bg_bottom">#1F4FD6</color>
+    <color name="splash_bg">#FFFFFF</color>
+</resources>

@@ -1,0 +1,90 @@
+{
+  "name": "videograbber",
+  "productName": "VideoGrabber",
+  "version": "1.0.0",
+  "description": "A browser with a built-in video & audio downloader — any quality up to 4K/8K.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "fetch:win": "node scripts/fetch-binaries.mjs win-x64",
+    "icons": "node scripts/make-ico.js",
+    "dist:mac": "electron-builder --mac --arm64 && electron-builder --mac --x64",
+    "dist:win": "electron-builder --win",
+    "fetch:mac": "node scripts/fetch-binaries.mjs mac-arm64 && node scripts/fetch-binaries.mjs mac-x64",
+    "release": "node scripts/collect-release.mjs"
+  },
+  "build": {
+    "appId": "com.videograbber.app",
+    "productName": "VideoGrabber",
+    "directories": {
+      "output": "dist.noindex",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*"
+    ],
+    "afterPack": "scripts/after-pack.js",
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.video",
+      "icon": "build/icon.png",
+      "artifactName": "VideoGrabber-mac-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "bin/mac-${arch}",
+          "to": "bin"
+        }
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "dmg": {
+      "title": "VideoGrabber ${version}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "artifactName": "VideoGrabber-Setup-win-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "bin/win-${arch}",
+          "to": "bin"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "VideoGrabber",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "uninstallDisplayName": "VideoGrabber",
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "png-to-ico": "^2.1.8",
+    "resedit": "^2.0.3"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  },
+  "author": "Anshu Prasad",
+  "license": "MIT"
+}

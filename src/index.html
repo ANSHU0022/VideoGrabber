@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob: file:; media-src * blob: file:; style-src 'self' 'unsafe-inline'" />
+  <title>VideoGrabber</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="chrome">
+    <div class="tabstrip">
+      <div class="traffic"></div>
+      <div id="tabs" class="tabs"></div>
+      <button id="new-tab" class="icon-btn sm" title="New Tab (⌘T)" data-icon="plus"></button>
+      <div class="drag-fill"></div>
+    </div>
+    <div class="navbar">
+      <div class="nav-group">
+        <button id="back" class="icon-btn" title="Back (⌘[)" data-icon="back"></button>
+        <button id="fwd" class="icon-btn" title="Forward (⌘])" data-icon="forward"></button>
+        <button id="reload" class="icon-btn" title="Reload (⌘R)" data-icon="reload"></button>
+        <button id="home" class="icon-btn" title="Home" data-icon="home"></button>
+      </div>
+      <form id="omnibox" class="omnibox">
+        <span id="omni-icon" class="omni-icon" data-icon="search"></span>
+        <input id="addr" spellcheck="false" autocomplete="off" placeholder="Search or enter address" />
+        <button type="button" id="omni-pill" class="omni-pill hidden"></button>
+      </form>
+      <button id="dl-btn" class="btn primary" disabled><span data-icon="download"></span><span id="dl-label">Download</span></button>
+      <div class="nav-sep"></div>
+      <button id="panel-btn" class="icon-btn" title="Toggle panel (⌘⇧D)" data-icon="sidebar"><span id="badge" class="count-badge hidden"></span></button>
+      <button id="settings-btn" class="icon-btn" title="Settings (⌘,)" data-icon="settings"></button>
+    </div>
+  </header>
+
+  <main>
+    <div id="views" class="views"></div>
+
+    <aside id="sidebar" class="sidebar">
+      <section class="sb-section" id="sec-page">
+        <div class="sb-head"><h2>On this page</h2></div>
+        <div id="page-body"></div>
+      </section>
+
+      <section class="sb-section" id="sec-streams">
+        <div class="sb-head">
+          <h2>Detected streams</h2><span id="streams-count" class="pill-count hidden"></span>
+        </div>
+        <div id="streams" class="rows"></div>
+      </section>
+
+      <section class="sb-section grow" id="sec-downloads">
+        <div class="sb-head">
+          <h2>Downloads</h2><span id="jobs-count" class="pill-count hidden"></span>
+          <div class="sb-actions">
+            <button id="clear-done" class="text-btn hidden">Clear</button>
+            <button id="open-folder" class="icon-btn xs" title="Open downloads folder" data-icon="folder"></button>
+            <button id="history-open" class="icon-btn xs" title="All downloads (⌘⇧H)" data-icon="expand"></button>
+          </div>
+        </div>
+        <div id="jobs" class="rows"></div>
+        <button id="history-link" class="history-link hidden"></button>
+      </section>
+    </aside>
+
+    <section id="history" class="history hidden" aria-label="Download history">
+      <div class="h-toolbar">
+        <div class="h-title">
+          <h1>Downloads</h1>
+          <span id="h-stats" class="h-stats"></span>
+        </div>
+        <div class="h-search">
+          <span data-icon="search"></span>
+          <input id="h-q" placeholder="Search downloads" spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="segmented" id="h-type">
+          <button data-v="all" class="on">All</button><button data-v="video">Video</button><button data-v="audio">Audio</button>
+        </div>
+        <select id="h-sort" class="select">
+          <option value="new">Newest first</option><option value="old">Oldest first</option>
+          <option value="big">Largest first</option><option value="name">Name</option>
+        </select>
+        <div class="segmented icons" id="h-view">
+          <button data-v="list" title="List" data-icon="list"></button>
+          <button data-v="rows" title="Details" data-icon="rows"></button>
+          <button data-v="grid" title="Cards" data-icon="grid"></button>
+        </div>
+        <div class="nav-sep"></div>
+        <button id="h-clear" class="text-btn">Clear history</button>
+        <button id="h-close" class="icon-btn" title="Close (Esc)" data-icon="x"></button>
+      </div>
+      <div id="h-body" class="h-body"></div>
+    </section>
+  </main>
+
+  <div id="settings" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-labelledby="settings-title">
+      <div class="modal-head">
+        <h1 id="settings-title">Settings</h1>
+        <button id="settings-close" class="icon-btn" data-icon="x" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="set-group">
+          <div class="set-row">
+            <div><div class="set-label">Appearance</div></div>
+            <div class="segmented" id="theme-seg">
+              <button data-v="system">System</button><button data-v="light">Light</button><button data-v="dark">Dark</button>
+            </div>
+          </div>
+        </div>
+        <div class="set-group">
+          <div class="set-row">
+            <div class="min0"><div class="set-label">Download location</div><div id="set-folder" class="set-desc mono ellipsis"></div></div>
+            <button id="set-folder-btn" class="btn">Change…</button>
+          </div>
+          <div class="set-row">
+            <div><div class="set-label">Video format</div><div class="set-desc">MKV keeps 4K/8K at full quality. H.264 MP4 plays in QuickTime but usually stops at 1080p.</div></div>
+            <select id="set-compat" class="select">
+              <option value="0">Best quality</option>
+              <option value="1">QuickTime compatible</option>
+            </select>
+          </div>
+          <div class="set-row">
+            <div><div class="set-label">Default audio format</div></div>
+            <select id="set-audio" class="select">
+              <option value="mp3">MP3</option><option value="m4a">M4A (AAC)</option><option value="opus">Opus</option><option value="flac">FLAC</option>
+            </select>
+          </div>
+          <div class="set-row">
+            <div><div class="set-label">Parallel connections</div><div class="set-desc">For streaming sites that split video into segments.</div></div>
+            <select id="set-conn" class="select">
+              <option>4</option><option>8</option><option>16</option>
+            </select>
+          </div>
+        </div>
+        <div class="set-group">
+          <div class="set-row">
+            <div><div class="set-label">Download engine</div><div id="set-engine" class="set-desc"></div></div>
+            <button id="set-update" class="btn">Check for updates</button>
+          </div>
+          <div class="set-row">
+            <div><div class="set-label">Accelerated downloads</div><div id="set-aria" class="set-desc"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="player" class="player hidden" role="dialog" aria-label="Video player">
+    <div class="player-bar">
+      <div id="player-title" class="player-title"></div>
+      <button id="player-reveal" class="player-btn"></button>
+      <button id="player-external" class="player-btn">Open in default player</button>
+      <button id="player-close" class="icon-btn" title="Close (Esc)" data-icon="x"></button>
+    </div>
+    <div class="player-stage">
+      <video id="player-video" controls playsinline></video>
+      <div id="player-error" class="player-error hidden">
+        <b>This file can't play inside the app</b>
+        <span>Its video format isn't supported here. It will open in your default player.</span>
+        <button id="player-error-open" class="btn primary">Open in default player</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="icons.js"></script>
+  <script src="renderer.js"></script>
+  <script src="history.js"></script>
+  <script src="player.js"></script>
+</body>
+</html>
