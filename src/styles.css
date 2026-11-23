@@ -362,3 +362,12 @@ body.history-open .views, body.history-open .sidebar { display: none; }
 .player-error { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #d4d4d8; text-align: center; }
 .player-error b { color: #fff; font-size: 16px; }
 .player-error .btn { margin-top: 8px; }
+
+/* startup loader */
+#boot { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: var(--surface); color: var(--text); transition: opacity .18s ease; }
+#boot.done { opacity: 0; pointer-events: none; }
+#boot img { border-radius: 14px; }
+#boot b { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+#boot i { width: 18px; height: 18px; margin-top: 4px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; opacity: .55; animation: boot-spin .7s linear infinite; }
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #boot i { animation-duration: 2s; } }

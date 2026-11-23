@@ -13,6 +13,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -22,6 +23,7 @@ import java.io.File
 import java.net.URI
 
 class ProbeException(message: String) : Exception(message)
+class ProbeTimeout : Exception("This site took too long to respond. Reload the page to try again.")
 
 /** Thin wrapper over yt-dlp (Python) running on the device. */
 object Engine {
@@ -37,6 +39,7 @@ object Engine {
     private val ready = CompletableDeferred<Unit>()
     private lateinit var cacheDir: File
     private lateinit var infoDir: File
+    private const val PROBE_TIMEOUT_MS = 60_000L
 
     fun init(ctx: Context) {
         // yt-dlp's own cache (YouTube player code + solved signatures). The Android wrapper adds
@@ -79,10 +82,18 @@ object Engine {
         val r = YoutubeDLRequest(url)
         baseOptions(r, cookies, userAgent)
         r.addOption("-J")
+        r.addOption("--socket-timeout", "15")
         // YouTube: the direct (non-HLS/DASH) formats already include every quality up to 8K.
         // Skipping the manifests + subtitle translations makes the check ~25% faster.
         if (fast) r.addOption("--extractor-args", "youtube:skip=hls,dash,translated_subs")
         val t0 = SystemClock.elapsedRealtime()
+        // Without a limit a stalled connection leaves the button on "Detecting" forever.
+        var timedOut = false
+        val watchdog = scope.launch {
+            delay(PROBE_TIMEOUT_MS)
+            timedOut = true
+            cancel(key)
+        }
         try {
             val resp = YoutubeDL.getInstance().execute(r, key)
             Log.i("VideoGrabber", "probe ${SystemClock.elapsedRealtime() - t0} ms  $url")
@@ -91,7 +102,11 @@ object Engine {
             val info = parseInfo(JSONObject(resp.out), url).copy(infoJson = json.absolutePath, fetchedAt = System.currentTimeMillis())
             // Live streams only exist as HLS — if the fast check found nothing, look again without skipping.
             if (fast && info.qualities.isEmpty() && url.contains("youtu")) probe(url, key, null, userAgent, fast = false) else info
+        } catch (e: Exception) {
+            if (timedOut) throw ProbeTimeout()
+            throw e
         } finally {
+            watchdog.cancel()
             cookies?.delete()
         }
     }

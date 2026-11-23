@@ -44,6 +44,15 @@ let active = null;
 let seq = 0;
 let settings = {};
 
+// ---------- startup loader: covers the first page until it has painted ----------
+function hideBootLoader() {
+  const b = document.getElementById('boot');
+  if (!b) return;
+  b.classList.add('done');
+  setTimeout(() => b.remove(), 220);
+}
+setTimeout(hideBootLoader, 6000); // never leave it up if the first page fails
+
 // ---------- tabs ----------
 function createTab(url = HOME, { background = false } = {}) {
   const wv = document.createElement('webview');
@@ -56,6 +65,7 @@ function createTab(url = HOME, { background = false } = {}) {
     mode: 'video', height: null,
   };
   wv.addEventListener('did-attach', () => { try { tab.wcId = wv.getWebContentsId(); } catch {} });
+  wv.addEventListener('dom-ready', hideBootLoader, { once: true });
   wv.addEventListener('dom-ready', () => { if (!tab.wcId) try { tab.wcId = wv.getWebContentsId(); } catch {} });
   wv.addEventListener('did-start-loading', () => { tab.loading = true; renderTabs(); tab === active && renderNav(); });
   wv.addEventListener('did-stop-loading', () => { tab.loading = false; renderTabs(); tab === active && renderNav(); });
@@ -188,13 +198,18 @@ const NOISE_PARAMS = ['t', 'pp', 'si', 'feature', 'ab_channel', 'start', 'time_c
 function videoKey(url) {
   try {
     const u = new URL(url);
+    const host = u.hostname.replace(/^(www|m|mobile)\./, '');
+    // A pasted youtu.be link redirects to youtube.com/watch: it's the same video.
+    if (host === 'youtu.be') return `youtube.com/watch?v=${u.pathname.slice(1)}`;
     NOISE_PARAMS.forEach((p) => u.searchParams.delete(p));
     u.searchParams.sort();
-    return u.origin + u.pathname + '?' + u.searchParams.toString();
+    return host + u.pathname + '?' + u.searchParams.toString();
   } catch { return url; }
 }
 
 const probeTimers = new Map();
+const probeCache = new Map(); // video → result, so reopening a video is instant
+const PROBE_CACHE_MS = 30 * 60e3;
 function onUrl(tab, url) {
   if (url === tab.url) return;
   const same = tab.url && videoKey(url) === videoKey(tab.url);
@@ -206,9 +221,11 @@ function onUrl(tab, url) {
   tab.probeSeq++;
   tab.probe = 'idle';
   tab.probeMsg = '';
+  const hit = probeCache.get(videoKey(url));
+  if (hit && Date.now() - hit.at < PROBE_CACHE_MS) { applyProbe(tab, hit.r); return; }
   if (/^https?:/.test(url) && !/\/\/(www\.)?google\.[a-z.]+\/(search|webhp)?(\?|$)/.test(url) && !/youtube\.com\/?(\?|$|results|feed)/.test(url)) {
     tab.probe = 'loading';
-    probeTimers.set(tab.id, setTimeout(() => probe(tab, url), 600));
+    probeTimers.set(tab.id, setTimeout(() => probe(tab, url), 150));
   }
   renderTabs();
   if (tab === active) { renderNav(); renderPage(); renderStreams(); }
@@ -218,7 +235,13 @@ function onUrl(tab, url) {
 async function probe(tab, url) {
   const mySeq = ++tab.probeSeq;
   const r = await window.vg.probe(url, tab.id);
-  if (mySeq !== tab.probeSeq || url !== tab.url || r.cancelled) return;
+  // Compare the video, not the exact URL: YouTube adds params to the address while it loads.
+  if (mySeq !== tab.probeSeq || videoKey(url) !== videoKey(tab.url) || r.cancelled) return;
+  if (!r.error) probeCache.set(videoKey(url), { r, at: Date.now() });
+  applyProbe(tab, r);
+}
+
+function applyProbe(tab, r) {
   if (r.error) {
     tab.probe = 'none';
     tab.probeMsg = /Unsupported URL|No video|not a valid URL|Unable to extract|no video formats/i.test(r.error) ? '' : r.error;
@@ -229,7 +252,7 @@ async function probe(tab, url) {
     if (!r.qualities.some((q) => q.height === tab.height)) tab.height = r.qualities[0] ? r.qualities[0].height : null;
   }
   renderTabs();
-  if (tab === active) { renderNav(); renderPage(); }
+  if (tab === active) { renderNav(); renderPage(); renderStreams(); }
 }
 
 function renderPage() {

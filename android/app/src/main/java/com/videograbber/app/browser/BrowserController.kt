@@ -34,10 +34,18 @@ import com.videograbber.app.data.Stream
 import com.videograbber.app.download.Cookies
 import com.videograbber.app.download.Downloads
 import com.videograbber.app.download.Engine
+import com.videograbber.app.data.VideoInfo
 import com.videograbber.app.download.ProbeException
+import com.videograbber.app.download.ProbeTimeout
 import com.videograbber.app.ui.qShort
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import org.json.JSONTokener
+import org.json.JSONObject
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import com.videograbber.app.data.Quality
+import android.util.Log
 
 /** Owns the tabs and their WebViews (kept alive across recompositions and config changes). */
 class BrowserController(private val activity: ComponentActivity) {
@@ -177,11 +185,16 @@ class BrowserController(private val activity: ComponentActivity) {
     // ---------------- video detection ----------------
     private val NOISE = setOf("t", "pp", "si", "feature", "ab_channel", "start", "time_continue", "utm_source", "utm_medium", "utm_campaign", "fbclid", "igsh", "igshid")
 
+    private val probeCache = HashMap<String, VideoInfo>() // reopening a video is instant
+    private val PROBE_CACHE_MS = 30 * 60_000L
+
     private fun videoKey(url: String): String = runCatching {
         val u = Uri.parse(url)
         val q = u.queryParameterNames.filter { it !in NOISE }.sorted().joinToString("&") { "$it=${u.getQueryParameter(it)}" }
         // www.youtube.com and m.youtube.com are the same page (sites redirect between them)
         val host = u.host.orEmpty().removePrefix("www.").removePrefix("m.").removePrefix("mobile.")
+        // A pasted youtu.be link redirects to youtube.com/watch: same video, so don't check it twice.
+        if (host == "youtu.be") return@runCatching "youtube.com/watch?v=${u.path.orEmpty().trim('/')}"
         "$host${u.path}?$q"
     }.getOrDefault(url)
 
@@ -204,7 +217,14 @@ class BrowserController(private val activity: ComponentActivity) {
         Engine.cancel("probe-${t.id}")
         t.info = null; t.probeMsg = ""; t.pageImage = null
         t.probe = ProbeState.IDLE
-        if (VIDEO_PAGES.any { it.containsMatchIn(url) }) probe(t)
+        if (VIDEO_PAGES.any { it.containsMatchIn(url) }) {
+            val hit = probeCache[key]
+            if (hit != null && System.currentTimeMillis() - hit.fetchedAt < PROBE_CACHE_MS) {
+                t.info = hit
+                if (hit.qualities.none { it.height == t.height }) t.height = hit.qualities.firstOrNull()?.height
+                t.probe = ProbeState.FOUND
+            } else probe(t)
+        }
     }
 
     /** Ask yt-dlp which qualities this page offers. */
@@ -215,24 +235,92 @@ class BrowserController(private val activity: ComponentActivity) {
         t.probe = ProbeState.LOADING
         t.probeMsg = ""
         t.probeJob = activity.lifecycleScope.launch {
+            // The open YouTube page already knows its formats: show them at once while
+            // yt-dlp does the slower full check in the background.
+            val instant = launch { readYouTubePage(t, url) }
             try {
-                val info = Engine.probe(url, "probe-${t.id}", Cookies.fileFor(activity, url), userAgent)
+                val info = try {
+                    Engine.probe(url, "probe-${t.id}", Cookies.fileFor(activity, url), userAgent)
+                } catch (e: ProbeTimeout) { // stalled connection: one automatic retry
+                    Engine.probe(url, "probe-${t.id}", Cookies.fileFor(activity, url), userAgent)
+                }
+                instant.cancel()
+                probeCache[videoKey(url)] = info
                 if (videoKey(t.url) != videoKey(url)) return@launch
                 t.info = info
                 if (info.qualities.none { it.height == t.height }) t.height = info.qualities.firstOrNull()?.height
                 t.probe = ProbeState.FOUND
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: ProbeTimeout) {
+                instant.cancel()
+                if (videoKey(t.url) == videoKey(url) && t.info == null) { t.probe = ProbeState.NONE; t.probeMsg = e.message.orEmpty() }
             } catch (e: ProbeException) {
-                if (videoKey(t.url) == videoKey(url)) { t.probe = ProbeState.NONE; t.probeMsg = e.message.orEmpty() }
+                instant.cancel()
+                if (videoKey(t.url) == videoKey(url) && t.info == null) { t.probe = ProbeState.NONE; t.probeMsg = e.message.orEmpty() }
             } catch (e: Exception) {
-                if (videoKey(t.url) != videoKey(url)) return@launch
+                instant.cancel()
+                if (videoKey(t.url) != videoKey(url) || t.info != null) return@launch
                 val msg = Engine.errorLine(e)
                 t.probe = ProbeState.NONE
                 t.probeMsg = if (Regex("Unsupported URL|no video|not a valid URL|Unable to extract|No video formats|Canceled", RegexOption.IGNORE_CASE).containsMatchIn(msg)) "" else msg
             }
         }
     }
+
+    private val YT_ID = Regex("""(?:[?&]v=|youtu\.be/|/shorts/|/live/)([\w-]{11})""")
+
+    private suspend fun readYouTubePage(t: Tab, url: String) {
+        val id = YT_ID.find(url)?.groupValues?.get(1) ?: return
+        repeat(40) {
+            val wv = t.webView
+            if (t.info != null || videoKey(t.url) != videoKey(url)) return
+            if (wv != null) {
+                val raw = CompletableDeferred<String?>()
+                wv.evaluateJavascript(YT_PAGE_JS) { raw.complete(it) }
+                val info = runCatching { parseYouTubePage(raw.await(), id, url) }.getOrNull()
+                if (info != null) {
+                    t.info = info
+                    if (info.qualities.none { it.height == t.height }) t.height = info.qualities.first().height
+                    t.probe = ProbeState.FOUND
+                    Log.i("VideoGrabber", "instant ${info.qualities.map { it.height }} $url")
+                    return
+                }
+            }
+            delay(250)
+        }
+    }
+
+    private fun parseYouTubePage(raw: String?, id: String, url: String): VideoInfo? {
+        val text = raw?.takeIf { it != "null" }?.let { JSONTokener(it).nextValue() as? String } ?: return null
+        val j = JSONObject(text)
+        if (j.optString("id") != id) return null
+        val f = j.getJSONArray("f")
+        val rows = (0 until f.length()).map { f.getJSONObject(it) }
+        val audio = rows.filter { it.optBoolean("audio") }.maxByOrNull { it.optLong("br") }?.optLong("size") ?: 0L
+        val qualities = rows.filter { !it.optBoolean("audio") && it.optInt("h") > 0 }
+            .groupBy { it.optInt("h") }.values
+            .map { same -> same.maxBy { it.optLong("br") } }
+            .map { Quality(it.optInt("h"), it.optInt("fps"), it.optLong("size").let { s -> if (s > 0) s + audio else 0L }, it.optBoolean("hdr")) }
+            .sortedByDescending { it.height }
+        if (qualities.isEmpty()) return null
+        return VideoInfo(
+            title = j.optString("title"), thumbnail = "https://i.ytimg.com/vi/$id/hqdefault.jpg",
+            duration = j.optInt("len"), uploader = j.optString("author"), site = "youtube.com",
+            url = "https://www.youtube.com/watch?v=$id", isLive = j.optBoolean("live"),
+            qualities = qualities, audioSize = audio,
+        )
+    }
+
+    private val YT_PAGE_JS = """(function(){try{
+        var p=document.getElementById('movie_player'),r=p&&p.getPlayerResponse&&p.getPlayerResponse();
+        if(!r||!r.streamingData)r=window.ytInitialPlayerResponse;
+        if(!r||!r.videoDetails||!r.streamingData)return null;
+        var d=r.videoDetails;
+        return JSON.stringify({id:d.videoId,title:d.title,author:d.author,len:+d.lengthSeconds||0,live:!!d.isLive,
+          f:(r.streamingData.adaptiveFormats||[]).map(function(x){return{h:x.height||0,fps:x.fps||0,size:+x.contentLength||0,br:x.bitrate||0,
+            audio:/^audio/.test(x.mimeType||''),hdr:!!(x.colorInfo&&/2084|HLG|ARIB/i.test(x.colorInfo.transferCharacteristics||''))}})});
+      }catch(e){return null}})()"""
 
     private fun classify(url: String, mime: String? = null): String? {
         val u = url.lowercase()

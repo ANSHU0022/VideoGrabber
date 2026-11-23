@@ -1,7 +1,7 @@
 {
   "name": "videograbber",
   "productName": "VideoGrabber",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A browser with a built-in video & audio downloader — any quality up to 4K/8K.",
   "main": "src/main.js",
   "scripts": {

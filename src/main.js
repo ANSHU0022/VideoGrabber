@@ -10,6 +10,7 @@ const PARTITION = 'persist:browser';
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 let win;
+let appQuitting = false;
 
 // ---------- settings ----------
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
@@ -65,9 +66,11 @@ function freshYtdlp() {
     bins.ytdlp = mine;
   } catch { return; }
   if (Date.now() - (settings.lastYtdlpUpdate || 0) < 24 * 3600e3) return;
+  sparesPaused = true; // don't hold the file open while it replaces itself
   const c = spawn(mine, ['-U'], { env: childEnv(), windowsHide: true });
-  c.on('close', (code) => { if (code === 0) { settings.lastYtdlpUpdate = Date.now(); saveSettings(); } });
-  c.on('error', () => {});
+  const done = () => { sparesPaused = false; fillSpares(); };
+  c.on('close', (code) => { if (code === 0) { settings.lastYtdlpUpdate = Date.now(); saveSettings(); ytdlpVersion(); } done(); });
+  c.on('error', done);
 }
 // GUI apps launched from Finder get a minimal PATH; make sure brew tools are reachable.
 const childEnv = () => ({
@@ -216,28 +219,69 @@ app.on('web-contents-created', (_e, contents) => {
 });
 
 // ---------- probe: what can be downloaded from this URL? (one in flight per tab) ----------
+// The packaged yt-dlp unpacks itself on every launch (~14 s). So we keep started copies waiting
+// for a URL on stdin: a check then only pays for the network work (~3 s).
+const SPARE_COUNT = 2;
+const PROBE_TIMEOUT = 40000;
+const spares = [];
+let sparesPaused = false;
+const probeArgs = () => [...commonArgs(), '--socket-timeout', '15', '--extractor-args', 'youtube:skip=translated_subs', '-J'];
+function spawnSpare() {
+  const child = spawn(bins.ytdlp, [...probeArgs(), '--batch-file', '-'], { env: childEnv(), windowsHide: true });
+  const spare = { child, out: '', err: '' };
+  child.stdout.on('data', (d) => (spare.out += d));
+  child.stderr.on('data', (d) => {
+    spare.err += d;
+    // yt-dlp prints this once it has unpacked and is waiting for a URL
+    if (!spare.ready && spare.err.includes('Reading URLs')) { spare.ready = true; fillSpares(); }
+  });
+  child.stdin.on('error', () => {});
+  const drop = () => { const i = spares.indexOf(spare); if (i >= 0) spares.splice(i, 1); };
+  child.on('error', drop);
+  child.on('close', drop);
+  spares.push(spare);
+  return spare;
+}
+function fillSpares() {
+  if (sparesPaused || appQuitting || !bins.ytdlp) return;
+  // One at a time: unpacking is heavy, and must not slow the app down while it opens.
+  if (spares.length < SPARE_COUNT && spares.every((x) => x.ready)) spawnSpare();
+}
+function stopSpares() { for (const s of spares.splice(0)) { try { s.child.stdin.destroy(); } catch {} killTree(s.child); } }
+
 const probes = new Map();
-ipcMain.handle('probe', async (_e, url, key) => {
-  const prev = probes.get(key);
-  if (prev) { try { prev.kill(); } catch {} probes.delete(key); }
-  if (!bins.ytdlp) return { error: 'yt-dlp not found. Install with: brew install yt-dlp' };
-  await writeCookies();
+function runProbe(url, key) {
   return new Promise((resolve) => {
-    const child = spawn(bins.ytdlp, [...commonArgs(), '-J', url], { env: childEnv(), windowsHide: true });
+    const spare = spares.find((x) => x.ready) || spares[0] || spawnSpare();
+    spares.splice(spares.indexOf(spare), 1);
+    const { child } = spare;
     probes.set(key, child);
-    let out = '', err = '';
-    const timer = setTimeout(() => child.kill(), 90000);
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
-    child.on('close', (code) => {
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; killTree(child); }, PROBE_TIMEOUT);
+    child.once('error', () => { clearTimeout(timer); resolve({ error: 'Could not start the download engine.' }); });
+    child.once('close', (code) => {
       clearTimeout(timer);
-      if (probes.get(key) === child) probes.delete(key);
-      if (code === null) return resolve({ cancelled: true });
-      if (code !== 0 || !out) return resolve({ error: lastErrorLine(err) || 'No downloadable video found on this page.' });
-      try { resolve(summarize(JSON.parse(out))); }
+      const cancelled = probes.get(key) !== child;
+      if (!cancelled) probes.delete(key);
+      if (cancelled) return resolve({ cancelled: true });
+      if (timedOut) return resolve({ timedOut: true, error: 'This site took too long to respond. Reload the page to try again.' });
+      if (code !== 0 || !spare.out) return resolve({ error: lastErrorLine(spare.err) || 'No downloadable video found on this page.' });
+      try { resolve(summarize(JSON.parse(spare.out))); }
       catch { resolve({ error: 'Could not read video info.' }); }
     });
+    child.stdin.end(url + '\n');
+    fillSpares();
   });
+}
+ipcMain.handle('probe', async (_e, url, key) => {
+  const prev = probes.get(key);
+  if (prev) { probes.delete(key); killTree(prev); }
+  if (!bins.ytdlp) return { error: 'yt-dlp not found. Install with: brew install yt-dlp' };
+  if (!/^https?:\/\/\S+$/i.test(url)) return { error: 'Not a valid URL' };
+  await writeCookies();
+  let r = await runProbe(url, key);
+  if (r.timedOut) r = await runProbe(url, key); // one automatic retry on a stalled connection
+  return r;
 });
 
 function summarize(info) {
@@ -503,7 +547,8 @@ ipcMain.handle('history-clear', () => { history = []; saveHistory(); return true
 ipcMain.handle('reveal', (_e, file) => file && shell.showItemInFolder(file));
 ipcMain.handle('open-file', (_e, file) => file && shell.openPath(file));
 ipcMain.handle('open-folder', () => { fs.mkdirSync(settings.downloadDir, { recursive: true }); shell.openPath(settings.downloadDir); });
-ipcMain.handle('get-settings', async () => ({ ...settings, bins, version: await ytdlpVersion() }));
+// Never wait for yt-dlp here: the first page can't open until this returns.
+ipcMain.handle('get-settings', () => ({ ...settings, bins, version: settings.ytdlpVersion || '' }));
 ipcMain.handle('set-settings', (_e, patch) => {
   Object.assign(settings, patch);
   if (patch.theme) nativeTheme.themeSource = settings.theme;
@@ -519,10 +564,16 @@ ipcMain.handle('choose-folder', async () => {
 function ytdlpVersion() {
   return new Promise((resolve) => {
     if (!bins.ytdlp) return resolve('');
-    execFile(bins.ytdlp, ['--version'], { env: childEnv(), timeout: 15000, windowsHide: true }, (e, out) => resolve(e ? '' : out.trim()));
+    execFile(bins.ytdlp, ['--version'], { env: childEnv(), timeout: 15000, windowsHide: true }, (e, out) => {
+      const v = e ? '' : out.trim();
+      if (v && v !== settings.ytdlpVersion) { settings.ytdlpVersion = v; saveSettings(); }
+      resolve(v);
+    });
   });
 }
 ipcMain.handle('update-ytdlp', async () => {
+  sparesPaused = true; stopSpares(); // release the file so it can be replaced
+  setTimeout(() => { sparesPaused = false; fillSpares(); }, 60000);
   if (!bins.ytdlp) return { ok: false, message: 'yt-dlp not found' };
   const before = await ytdlpVersion();
   const viaBrew = /homebrew|\/usr\/local\/Cellar/.test(fs.realpathSync(bins.ytdlp));
@@ -587,9 +638,15 @@ app.whenReady().then(() => {
   setupBrowserSession();
   buildMenu();
   createWindow();
+  win.webContents.once('did-finish-load', () => setTimeout(() => {
+    fillSpares();
+    if (!settings.ytdlpVersion) ytdlpVersion();
+  }, 2000));
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 function stopAllJobs() {
+  appQuitting = true;
+  stopSpares();
   for (const j of jobs.values()) {
     j.cancelled = true;
     killTree(j.child);
